@@ -66,7 +66,6 @@ module ::DiscourseIpAlert
           data: {
             display_username: user.username,
             topic_title: message_title
-            # Wir verzichten hier auf eine URL, damit der Link nicht automatisch generiert wird.
           }.to_json
         )
         Rails.logger.info("[DiscourseIpAlert] Notification sent to #{admin.username}")
