@@ -1,1 +1,12 @@
+plugins:
+  ip_alert_enabled:
+    default: false
+    client: true
+    type: bool
+    description: "Aktiviere das IP-Alert-Plugin."
 
+  ip_alert_suspicious_ips:
+    default: "192.168.1.1,10.0.0.1,*.*.*.*"
+    client: true
+    type: string
+    description: "Liste verdächtiger IP-Adressen (kommagetrennt, Wildcards erlaubt)."
