@@ -6,7 +6,13 @@ plugins:
     description: "Aktiviere das IP-Alert-Plugin."
 
   ip_alert_suspicious_ips:
-    default: "192.168.1.1,10.0.0.1,*.*.*.*"
+    default: "134.3.123.187,149.88.102.34,80.187.67.20"
     client: true
     type: string
-    description: "Liste verdächtiger IP-Adressen (kommagetrennt, Wildcards erlaubt)."
+    description: "Liste verdächtiger IP-Adressen (kommagetrennt, Wildcards sind erlaubt)."
+
+  ip_alert_interval_minutes:
+    default: 360
+    client: true
+    type: number
+    description: "Intervall in Minuten für den periodischen IP-Check (z. B. 360 = 6 Stunden)."
