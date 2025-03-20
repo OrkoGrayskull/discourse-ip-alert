@@ -61,7 +61,7 @@ module ::DiscourseIpAlert
     admin_users.each do |admin|
       begin
         Notification.create!(
-          notification_type: Notification.types[:flagged_post],
+          notification_type: Notification.types[:custom],
           user_id: admin.id,
           data: {
             display_username: user.username,
