@@ -96,7 +96,7 @@ module ::DiscourseIpAlert
   # Periodischer Check: Überprüft alle Nutzer, die in den letzten 6 Stunden aktiv waren.
   def self.process_recent_user_ips
     Rails.logger.info("[DiscourseIpAlert] Running periodic IP check for users active in the last 360 minutes")
-    User.real.where("last_seen_at > ?", 2.hours.ago).find_each do |user|
+    User.real.where("last_seen_at > ?", 6.hours.ago).find_each do |user|
       ip_address = extract_ip(user)
       next unless ip_address.present?
 
@@ -125,7 +125,7 @@ after_initialize do
 
   module ::Jobs
     class CheckUserIPs < ::Jobs::Scheduled
-      every 2.hours
+      every 6.hours
 
       def execute(args)
         ::DiscourseIpAlert.process_recent_user_ips
