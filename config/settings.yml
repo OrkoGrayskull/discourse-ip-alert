@@ -10,9 +10,3 @@ plugins:
     client: true
     type: string
     description: "Liste verdächtiger IP-Adressen (kommagetrennt, Wildcards sind erlaubt)."
-
-  ip_alert_interval_minutes:
-    default: 360
-    client: true
-    type: number
-    description: "Intervall in Minuten für den periodischen IP-Check (z. B. 360 = 6 Stunden)."
