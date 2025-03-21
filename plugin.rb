@@ -9,7 +9,6 @@
 
 enabled_site_setting :ip_alert_enabled
 enabled_site_setting :ip_alert_suspicious_ips
-enabled_site_setting :ip_alert_interval_minutes
 
 module ::DiscourseIpAlert
   PLUGIN_NAME = "discourse-ip-alert"
@@ -36,7 +35,7 @@ module ::DiscourseIpAlert
     blocked_ips.any? do |blocked|
       if blocked.include?('*')
         pattern = blocked.gsub("*", "\\d{1,3}")
-        regex = /^#{pattern}$/
+        regex = /^#{pattern}$/  # Beispiel: /^93\.203\.\d{1,3}\.\d{1,3}$/ 
         ip_address.match?(regex)
       else
         begin
@@ -94,10 +93,10 @@ module ::DiscourseIpAlert
     Rails.logger.error("[DiscourseIpAlert] process_user_login Error: #{e.message}")
   end
 
-  # Periodischer Check: Überprüft alle Nutzer, die in den letzten 6 Stunden (oder entsprechend des Intervalls) aktiv waren.
+  # Periodischer Check: Überprüft alle Nutzer, die in den letzten 6 Stunden aktiv waren.
   def self.process_recent_user_ips
-    Rails.logger.info("[DiscourseIpAlert] Running periodic IP check for users active in the last #{SiteSetting.ip_alert_interval_minutes} minutes")
-    User.real.where("last_seen_at > ?", SiteSetting.ip_alert_interval_minutes.to_i.minutes.ago).find_each do |user|
+    Rails.logger.info("[DiscourseIpAlert] Running periodic IP check for users active in the last 360 minutes")
+    User.real.where("last_seen_at > ?", 2.hours.ago).find_each do |user|
       ip_address = extract_ip(user)
       next unless ip_address.present?
 
@@ -120,9 +119,13 @@ after_initialize do
     end
   end
 
+  # Führe den periodischen Check direkt nach der Plugin-Initialisierung aus
+  Rails.logger.info("[DiscourseIpAlert] Running initial IP check after plugin initialization")
+  ::DiscourseIpAlert.process_recent_user_ips
+
   module ::Jobs
     class CheckUserIPs < ::Jobs::Scheduled
-      every { SiteSetting.ip_alert_interval_minutes.to_i.minutes }  # Dynamischer Intervall, z. B. 360 Minuten (6 Stunden) per Standard
+      every 2.hours
 
       def execute(args)
         ::DiscourseIpAlert.process_recent_user_ips
