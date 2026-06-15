@@ -1,0 +1,6 @@
+de:
+  site_settings:
+    ip_alert_enabled: "IP-Alert-Plugin aktivieren."
+    ip_alert_suspicious_ips: "Verdächtige IP-Adressen oder Netze. Unterstützt einzelne IPs, CIDR-Netze und einfache IPv4-Wildcards wie 93.203.*.*."
+    ip_alert_recent_login_window_minutes: "Zeitraum in Minuten, den der periodische Check in den Login-Logs zurückprüft."
+    ip_alert_notification_cooldown_minutes: "Mindestabstand in Minuten, bevor für denselben Nutzer und dieselbe IP erneut eine Warnung erzeugt wird."
