@@ -1,134 +1,255 @@
 # frozen_string_literal: true
 
 # name: discourse-ip-alert
-# about: Sends an internal notification when a user logs in from a suspicious IP address.
-# version: 1.2
+# about: Sends an internal admin PM when a user logs in from a suspicious IP address.
+# version: 2.0.0
 # authors: OrkoGrayskull
 # url: https://github.com/OrkoGrayskull/discourse-ip-alert
-# required_version: 2.7.0
+# required_version: 3.3.0
 
 enabled_site_setting :ip_alert_enabled
-enabled_site_setting :ip_alert_suspicious_ips
 
 module ::DiscourseIpAlert
   PLUGIN_NAME = "discourse-ip-alert"
+  REDIS_PREFIX = "discourse-ip-alert"
 
-  require 'ipaddr'
+  require "ipaddr"
 
-  # Extrahiert die IP-Adresse des Nutzers
-  def self.extract_ip(user)
-    ip = user.ip_address.to_s
-    Rails.logger.info("[DiscourseIpAlert] Extracted IP: #{ip.inspect}")
-    ip
-  rescue => e
-    Rails.logger.error("[DiscourseIpAlert] extract_ip Error: #{e.message}")
+  def self.enabled?
+    SiteSetting.ip_alert_enabled
+  end
+
+  def self.rules
+    SiteSetting.ip_alert_suspicious_ips
+      .to_s
+      .split(/[,\|]/)
+      .map(&:strip)
+      .reject(&:blank?)
+      .uniq
+  end
+
+  def self.valid_ip?(value)
+    IPAddr.new(value.to_s)
+    true
+  rescue IPAddr::InvalidAddressError
+    false
+  end
+
+  def self.ip_to_addr(value)
+    IPAddr.new(value.to_s)
+  rescue IPAddr::InvalidAddressError
     nil
   end
 
-  # Prüft, ob die übergebene IP in der Blockliste enthalten ist
-  def self.ip_blocked?(ip_address)
-    return false if ip_address.blank?
+  def self.ipv4_wildcard_match?(ip_address, rule)
+    ip = ip_address.to_s
+    ip_parts = ip.split(".")
+    rule_parts = rule.to_s.split(".")
 
-    blocked_ips = SiteSetting.ip_alert_suspicious_ips.to_s.split(",").map(&:strip)
-    Rails.logger.info("[DiscourseIpAlert] Blocked IPs: #{blocked_ips.inspect}")
+    return false unless ip_parts.length == 4
+    return false unless rule_parts.length == 4
+    return false unless ip_parts.all? { |part| part.match?(/\A\d{1,3}\z/) && part.to_i.between?(0, 255) }
 
-    blocked_ips.any? do |blocked|
-      if blocked.include?('*')
-        pattern = blocked.gsub("*", "\\d{1,3}")
-        regex = /^#{pattern}$/  # Beispiel: /^93\.203\.\d{1,3}\.\d{1,3}$/ 
-        ip_address.match?(regex)
+    rule_parts.zip(ip_parts).all? do |rule_part, ip_part|
+      next true if rule_part == "*"
+      rule_part.match?(/\A\d{1,3}\z/) &&
+        rule_part.to_i.between?(0, 255) &&
+        rule_part.to_i == ip_part.to_i
+    end
+  end
+
+  def self.matching_rule(ip_address)
+    return nil if ip_address.blank?
+
+    ip = ip_to_addr(ip_address)
+    return nil if ip.blank?
+
+    rules.find do |rule|
+      if rule.include?("*")
+        ipv4_wildcard_match?(ip_address, rule)
       else
         begin
-          IPAddr.new(blocked).include?(ip_address)
+          IPAddr.new(rule).include?(ip)
         rescue IPAddr::InvalidAddressError
+          Rails.logger.warn("[DiscourseIpAlert] Ungültige IP-Regel ignoriert: #{rule.inspect}")
           false
         end
       end
     end
   rescue => e
-    Rails.logger.error("[DiscourseIpAlert] ip_blocked? Error: #{e.message}")
-    false
+    Rails.logger.error("[DiscourseIpAlert] Fehler beim IP-Abgleich: #{e.class}: #{e.message}")
+    nil
   end
 
-  # Sendet eine interne Notification an alle Admins, wenn eine verdächtige IP erkannt wird
-  def self.send_warning_notification(user, ip_address)
-    admin_users = User.where(admin: true)
-    return if admin_users.empty?
+  def self.recent_login_log_for(user)
+    return nil if !defined?(UserAuthTokenLog)
 
-    message_title = "⚠️ Verdächtige Anmeldung erkannt!"
+    UserAuthTokenLog
+      .where(user_id: user.id, action: "generate")
+      .order(created_at: :desc)
+      .first
+  rescue => e
+    Rails.logger.warn("[DiscourseIpAlert] Konnte UserAuthTokenLog nicht lesen: #{e.class}: #{e.message}")
+    nil
+  end
 
-    admin_users.each do |admin|
-      begin
-        Notification.create!(
-          notification_type: Notification.types[:custom],
-          user_id: admin.id,
-          data: {
-            display_username: user.username,
-            topic_title: message_title
-          }.to_json
+  def self.latest_auth_token_for(user)
+    return nil if !defined?(UserAuthToken)
+
+    UserAuthToken
+      .where(user_id: user.id)
+      .order(created_at: :desc)
+      .first
+  rescue => e
+    Rails.logger.warn("[DiscourseIpAlert] Konnte UserAuthToken nicht lesen: #{e.class}: #{e.message}")
+    nil
+  end
+
+  def self.login_context_for(user)
+    log = recent_login_log_for(user)
+
+    if log&.client_ip.present? && log.created_at > 5.minutes.ago
+      return {
+        ip_address: log.client_ip.to_s,
+        user_agent: log.user_agent.to_s,
+        path: log.path.to_s,
+        created_at: log.created_at,
+        source: "UserAuthTokenLog"
+      }
+    end
+
+    token = latest_auth_token_for(user)
+
+    {
+      ip_address: token&.client_ip.to_s.presence || user.ip_address.to_s,
+      user_agent: token&.user_agent.to_s,
+      path: nil,
+      created_at: token&.created_at,
+      source: token.present? ? "UserAuthToken" : "User"
+    }
+  end
+
+  def self.cooldown_key(user_id, ip_address)
+    "#{REDIS_PREFIX}:alerted:#{user_id}:#{ip_address}"
+  end
+
+  def self.cooldown_active?(user_id, ip_address)
+    Discourse.redis.get(cooldown_key(user_id, ip_address)).present?
+  end
+
+  def self.mark_cooldown(user_id, ip_address)
+    ttl = SiteSetting.ip_alert_notification_cooldown_minutes.to_i.minutes.to_i
+    ttl = 720.minutes.to_i if ttl <= 0
+
+    Discourse.redis.setex(cooldown_key(user_id, ip_address), ttl, "1")
+  end
+
+  def self.escape_backticks(value)
+    value.to_s.gsub("`", "\\`")
+  end
+
+  def self.send_admin_pm(user, ip_address, matched_rule, context)
+    admin_group = Group[:admins]
+    target_group_name = admin_group&.name || "admins"
+
+    title = "IP-Alert: #{user.username} von #{ip_address}"
+    title = title.truncate(SiteSetting.max_topic_title_length, separator: " ")
+
+    raw = <<~MD
+      Verdächtige Anmeldung erkannt.
+
+      Nutzer: @#{user.username}
+      Nutzerprofil: #{Discourse.base_url}/u/#{user.username}
+      Admin-Profil: #{Discourse.base_url}/admin/users/#{user.id}/#{user.username}
+      IP-Adresse: `#{escape_backticks(ip_address)}`
+      Trefferregel: `#{escape_backticks(matched_rule)}`
+      Quelle: `#{escape_backticks(context[:source])}`
+      Zeitpunkt: `#{escape_backticks(context[:created_at] || Time.zone.now)}`
+      Pfad: `#{escape_backticks(context[:path].presence || "-")}`
+      User-Agent: `#{escape_backticks(context[:user_agent].presence || "-")}`
+
+      Diese Meldung wurde automatisch durch das Plugin `#{PLUGIN_NAME}` erzeugt.
+    MD
+
+    PostCreator.create!(
+      Discourse.system_user,
+      title: title,
+      raw: raw,
+      archetype: Archetype.private_message,
+      target_group_names: target_group_name,
+      skip_validations: true
+    )
+  end
+
+  def self.process_login(user, context = nil)
+    return unless enabled?
+    return if user.blank?
+    return if user.id.to_i <= 0
+
+    context ||= login_context_for(user)
+    ip_address = context[:ip_address].to_s
+
+    return if ip_address.blank?
+    return unless valid_ip?(ip_address)
+
+    matched_rule = matching_rule(ip_address)
+    return if matched_rule.blank?
+
+    if cooldown_active?(user.id, ip_address)
+      Rails.logger.info("[DiscourseIpAlert] Alert übersprungen, Cooldown aktiv: user_id=#{user.id}, ip=#{ip_address}")
+      return
+    end
+
+    send_admin_pm(user, ip_address, matched_rule, context)
+    mark_cooldown(user.id, ip_address)
+
+    Rails.logger.warn("[DiscourseIpAlert] Verdächtige Anmeldung: user=#{user.username}, ip=#{ip_address}, rule=#{matched_rule}")
+  rescue => e
+    Rails.logger.error("[DiscourseIpAlert] process_login Fehler: #{e.class}: #{e.message}")
+  end
+
+  def self.process_recent_logins
+    return unless enabled?
+    return unless defined?(UserAuthTokenLog)
+
+    since = SiteSetting.ip_alert_recent_login_window_minutes.to_i.minutes.ago
+
+    UserAuthTokenLog
+      .where(action: "generate")
+      .where("created_at > ?", since)
+      .where.not(client_ip: nil)
+      .find_each do |log|
+        user = User.real.find_by(id: log.user_id)
+        next if user.blank?
+
+        process_login(
+          user,
+          {
+            ip_address: log.client_ip.to_s,
+            user_agent: log.user_agent.to_s,
+            path: log.path.to_s,
+            created_at: log.created_at,
+            source: "UserAuthTokenLog"
+          }
         )
-        Rails.logger.info("[DiscourseIpAlert] Notification sent to #{admin.username}")
-      rescue => e
-        Rails.logger.error("[DiscourseIpAlert] Error sending notification to #{admin.username}: #{e.message}")
       end
-    end
   rescue => e
-    Rails.logger.error("[DiscourseIpAlert] send_warning_notification Error: #{e.message}")
-  end
-
-  # Verarbeitet den Login eines Nutzers: Extrahiert die IP, prüft sie und sendet ggf. eine Notification
-  def self.process_user_login(user)
-    Rails.logger.info("[DiscourseIpAlert] Processing login for user: #{user.username}")
-
-    ip_address = extract_ip(user)
-    return unless ip_address.present?
-
-    if ip_blocked?(ip_address)
-      Rails.logger.warn("[DiscourseIpAlert] Suspicious IP detected: #{ip_address}")
-      send_warning_notification(user, ip_address)
-    else
-      Rails.logger.info("[DiscourseIpAlert] IP #{ip_address} is safe.")
-    end
-  rescue => e
-    Rails.logger.error("[DiscourseIpAlert] process_user_login Error: #{e.message}")
-  end
-
-  # Periodischer Check: Überprüft alle Nutzer, die in den letzten 6 Stunden aktiv waren.
-  def self.process_recent_user_ips
-    Rails.logger.info("[DiscourseIpAlert] Running periodic IP check for users active in the last 360 minutes")
-    User.real.where("last_seen_at > ?", 6.hours.ago).find_each do |user|
-      ip_address = extract_ip(user)
-      next unless ip_address.present?
-
-      if ip_blocked?(ip_address)
-        Rails.logger.warn("[DiscourseIpAlert] Suspicious IP detected for #{user.username}: #{ip_address}")
-        send_warning_notification(user, ip_address)
-      else
-        Rails.logger.info("[DiscourseIpAlert] IP #{ip_address} for #{user.username} is safe")
-      end
-    end
-  rescue => e
-    Rails.logger.error("[DiscourseIpAlert] process_recent_user_ips Error: #{e.message}")
+    Rails.logger.error("[DiscourseIpAlert] process_recent_logins Fehler: #{e.class}: #{e.message}")
   end
 end
 
 after_initialize do
-  reloadable_patch do |plugin|
-    on(:user_logged_in) do |user|
-      ::DiscourseIpAlert.process_user_login(user)
-    end
+  on(:user_logged_in) do |user|
+    ::DiscourseIpAlert.process_login(user)
   end
 
-  # Führe den periodischen Check direkt nach der Plugin-Initialisierung aus
-  Rails.logger.info("[DiscourseIpAlert] Running initial IP check after plugin initialization")
-  ::DiscourseIpAlert.process_recent_user_ips
-
   module ::Jobs
-    class CheckUserIPs < ::Jobs::Scheduled
+    class CheckSuspiciousLoginIPs < ::Jobs::Scheduled
       every 6.hours
+      sidekiq_options retry: false
 
-      def execute(args)
-        ::DiscourseIpAlert.process_recent_user_ips
+      def execute(_args)
+        ::DiscourseIpAlert.process_recent_logins
       end
     end
   end
