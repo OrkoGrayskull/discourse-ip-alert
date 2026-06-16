@@ -2,7 +2,7 @@
 
 # name: discourse-ip-alert
 # about: Sends an internal admin PM and optional email when a user logs in from a suspicious IP address.
-# version: 2.1.1
+# version: 2.1.2
 # authors: OrkoGrayskull
 # url: https://github.com/OrkoGrayskull/discourse-ip-alert
 # required_version: 3.3.0
@@ -73,7 +73,7 @@ module ::DiscourseIpAlert
       else
         begin
           IPAddr.new(rule).include?(ip)
-        rescue IPAddr::InvalidAddressError
+        rescue IPAddr::Error
           Rails.logger.warn("[DiscourseIpAlert] Ungültige IP-Regel ignoriert: #{rule.inspect}")
           false
         end
@@ -192,13 +192,32 @@ module ::DiscourseIpAlert
     end
   end
 
+  def self.admin_usernames
+    User.real
+      .where(admin: true, active: true)
+      .where(staged: false)
+      .where.not(id: Discourse.system_user.id)
+      .pluck(:username)
+      .join(",")
+  rescue => e
+    Rails.logger.error("[DiscourseIpAlert] Konnte Admin-Nutzernamen nicht lesen: #{e.class}: #{e.message}")
+    ""
+  end
+
   def self.send_admin_pm(user, ip_address, matched_rule, context)
+    usernames = admin_usernames
+
+    if usernames.blank?
+      Rails.logger.error("[DiscourseIpAlert] Keine Admin-Empfänger für PM gefunden")
+      return
+    end
+
     PostCreator.create!(
       Discourse.system_user,
       title: message_title(user, ip_address),
       raw: message_body(user, ip_address, matched_rule, context, markdown: true),
       archetype: Archetype.private_message,
-      target_group_names: "admins",
+      target_usernames: usernames,
       skip_validations: true
     )
   end
