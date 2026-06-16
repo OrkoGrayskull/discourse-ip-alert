@@ -2,7 +2,7 @@
 
 # name: discourse-ip-alert
 # about: Sends an internal admin PM and optional email when a user logs in from a suspicious IP address.
-# version: 2.1.2
+# version: 2.1.3
 # authors: OrkoGrayskull
 # url: https://github.com/OrkoGrayskull/discourse-ip-alert
 # required_version: 3.3.0
@@ -220,6 +220,8 @@ module ::DiscourseIpAlert
       target_usernames: usernames,
       skip_validations: true
     )
+
+    Rails.logger.info("[DiscourseIpAlert] Admin-PM erstellt: user=#{user.username}, ip=#{ip_address}")
   end
 
   def self.admin_email_recipients
@@ -241,6 +243,8 @@ module ::DiscourseIpAlert
 
     subject = message_title(user, ip_address)
     body = message_body(user, ip_address, matched_rule, context, markdown: false)
+
+    Rails.logger.warn("[DiscourseIpAlert] Admin-Mail-Benachrichtigung aktiv, enqueue Admin-Mails")
 
     admin_email_recipients.find_each do |admin|
       Jobs.enqueue(
@@ -337,10 +341,13 @@ after_initialize do
         message.from = SiteSetting.notification_email
         message.subject = args[:subject].to_s
         message.body = args[:body].to_s
+        message.content_type = "text/plain; charset=UTF-8"
         message.header["X-Auto-Response-Suppress"] = "All"
         message.header["X-Discourse-Sender"] = "discourse-ip-alert"
 
-        Email::Sender.new(message, :ip_alert, admin).send
+        Email::Sender.new(message, :admin_login, admin).send
+
+        Rails.logger.warn("[DiscourseIpAlert] Admin-Mail versendet: admin=#{admin.username}, to=#{to_address}")
       rescue => e
         Rails.logger.error("[DiscourseIpAlert] Versand der Admin-Mail fehlgeschlagen: #{e.class}: #{e.message}")
       end
