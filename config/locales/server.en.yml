@@ -1,0 +1,7 @@
+en:
+  site_settings:
+    ip_alert_enabled: "Enable the IP alert plugin."
+    ip_alert_suspicious_ips: "Suspicious IP addresses or networks. Supports single IPs, CIDR networks and simple IPv4 wildcards such as 93.203.*.*."
+    ip_alert_recent_login_window_minutes: "Time window in minutes used by the periodic check to inspect login logs."
+    ip_alert_notification_cooldown_minutes: "Minimum time in minutes before another alert is created for the same user and IP address."
+    ip_alert_email_admins: "Additionally notify admins by email via Discourse PM notifications."
