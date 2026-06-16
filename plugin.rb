@@ -2,7 +2,7 @@
 
 # name: discourse-ip-alert
 # about: Sends an internal admin PM when a user logs in from a suspicious IP address.
-# version: 2.0.0
+# version: 2.1.0
 # authors: OrkoGrayskull
 # url: https://github.com/OrkoGrayskull/discourse-ip-alert
 # required_version: 3.3.0
@@ -42,16 +42,19 @@ module ::DiscourseIpAlert
   end
 
   def self.ipv4_wildcard_match?(ip_address, rule)
-    ip = ip_address.to_s
-    ip_parts = ip.split(".")
+    ip_parts = ip_address.to_s.split(".")
     rule_parts = rule.to_s.split(".")
 
     return false unless ip_parts.length == 4
     return false unless rule_parts.length == 4
-    return false unless ip_parts.all? { |part| part.match?(/\A\d{1,3}\z/) && part.to_i.between?(0, 255) }
+
+    return false unless ip_parts.all? do |part|
+      part.match?(/\A\d{1,3}\z/) && part.to_i.between?(0, 255)
+    end
 
     rule_parts.zip(ip_parts).all? do |rule_part, ip_part|
       next true if rule_part == "*"
+
       rule_part.match?(/\A\d{1,3}\z/) &&
         rule_part.to_i.between?(0, 255) &&
         rule_part.to_i == ip_part.to_i
@@ -148,10 +151,18 @@ module ::DiscourseIpAlert
     value.to_s.gsub("`", "\\`")
   end
 
-  def self.send_admin_pm(user, ip_address, matched_rule, context)
-    admin_group = Group[:admins]
-    target_group_name = admin_group&.name || "admins"
+  def self.admin_usernames
+    User.real
+      .where(admin: true, active: true)
+      .where(staged: false)
+      .pluck(:username)
+      .join(",")
+  rescue => e
+    Rails.logger.error("[DiscourseIpAlert] Konnte Admin-Liste nicht lesen: #{e.class}: #{e.message}")
+    ""
+  end
 
+  def self.send_admin_pm(user, ip_address, matched_rule, context)
     title = "IP-Alert: #{user.username} von #{ip_address}"
     title = title.truncate(SiteSetting.max_topic_title_length, separator: " ")
 
@@ -171,20 +182,27 @@ module ::DiscourseIpAlert
       Diese Meldung wurde automatisch durch das Plugin `#{PLUGIN_NAME}` erzeugt.
     MD
 
-    PostCreator.create!(
-      Discourse.system_user,
+    args = {
       title: title,
       raw: raw,
       archetype: Archetype.private_message,
-      target_group_names: target_group_name,
+      target_group_names: "admins",
       skip_validations: true
-    )
+    }
+
+    if SiteSetting.ip_alert_email_admins
+      usernames = admin_usernames
+      args[:target_usernames] = usernames if usernames.present?
+    end
+
+    PostCreator.create!(Discourse.system_user, args)
   end
 
   def self.process_login(user, context = nil)
     return unless enabled?
     return if user.blank?
     return if user.id.to_i <= 0
+    return if user.respond_to?(:bot?) && user.bot?
 
     context ||= login_context_for(user)
     ip_address = context[:ip_address].to_s
