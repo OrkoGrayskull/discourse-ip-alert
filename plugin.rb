@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 # name: discourse-ip-alert
-# about: Sends an internal admin PM when a user logs in from a suspicious IP address.
-# version: 2.1.0
+# about: Sends an internal admin PM and optional email when a user logs in from a suspicious IP address.
+# version: 2.1.1
 # authors: OrkoGrayskull
 # url: https://github.com/OrkoGrayskull/discourse-ip-alert
 # required_version: 3.3.0
@@ -151,51 +151,88 @@ module ::DiscourseIpAlert
     value.to_s.gsub("`", "\\`")
   end
 
-  def self.admin_usernames
-    User.real
-      .where(admin: true, active: true)
-      .where(staged: false)
-      .pluck(:username)
-      .join(",")
-  rescue => e
-    Rails.logger.error("[DiscourseIpAlert] Konnte Admin-Liste nicht lesen: #{e.class}: #{e.message}")
-    ""
+  def self.message_title(user, ip_address)
+    title = "IP-Alert: #{user.username} von #{ip_address}"
+    title.truncate(SiteSetting.max_topic_title_length, separator: " ")
+  end
+
+  def self.message_body(user, ip_address, matched_rule, context, markdown: true)
+    if markdown
+      <<~MD
+        Verdächtige Anmeldung erkannt.
+
+        Nutzer: @#{user.username}
+        Nutzerprofil: #{Discourse.base_url}/u/#{user.username}
+        Admin-Profil: #{Discourse.base_url}/admin/users/#{user.id}/#{user.username}
+        IP-Adresse: `#{escape_backticks(ip_address)}`
+        Trefferregel: `#{escape_backticks(matched_rule)}`
+        Quelle: `#{escape_backticks(context[:source])}`
+        Zeitpunkt: `#{escape_backticks(context[:created_at] || Time.zone.now)}`
+        Pfad: `#{escape_backticks(context[:path].presence || "-")}`
+        User-Agent: `#{escape_backticks(context[:user_agent].presence || "-")}`
+
+        Diese Meldung wurde automatisch durch das Plugin `#{PLUGIN_NAME}` erzeugt.
+      MD
+    else
+      <<~TEXT
+        Verdächtige Anmeldung erkannt.
+
+        Nutzer: @#{user.username}
+        Nutzerprofil: #{Discourse.base_url}/u/#{user.username}
+        Admin-Profil: #{Discourse.base_url}/admin/users/#{user.id}/#{user.username}
+        IP-Adresse: #{ip_address}
+        Trefferregel: #{matched_rule}
+        Quelle: #{context[:source]}
+        Zeitpunkt: #{context[:created_at] || Time.zone.now}
+        Pfad: #{context[:path].presence || "-"}
+        User-Agent: #{context[:user_agent].presence || "-"}
+
+        Diese Meldung wurde automatisch durch das Plugin #{PLUGIN_NAME} erzeugt.
+      TEXT
+    end
   end
 
   def self.send_admin_pm(user, ip_address, matched_rule, context)
-    title = "IP-Alert: #{user.username} von #{ip_address}"
-    title = title.truncate(SiteSetting.max_topic_title_length, separator: " ")
-
-    raw = <<~MD
-      Verdächtige Anmeldung erkannt.
-
-      Nutzer: @#{user.username}
-      Nutzerprofil: #{Discourse.base_url}/u/#{user.username}
-      Admin-Profil: #{Discourse.base_url}/admin/users/#{user.id}/#{user.username}
-      IP-Adresse: `#{escape_backticks(ip_address)}`
-      Trefferregel: `#{escape_backticks(matched_rule)}`
-      Quelle: `#{escape_backticks(context[:source])}`
-      Zeitpunkt: `#{escape_backticks(context[:created_at] || Time.zone.now)}`
-      Pfad: `#{escape_backticks(context[:path].presence || "-")}`
-      User-Agent: `#{escape_backticks(context[:user_agent].presence || "-")}`
-
-      Diese Meldung wurde automatisch durch das Plugin `#{PLUGIN_NAME}` erzeugt.
-    MD
-
-    args = {
-      title: title,
-      raw: raw,
+    PostCreator.create!(
+      Discourse.system_user,
+      title: message_title(user, ip_address),
+      raw: message_body(user, ip_address, matched_rule, context, markdown: true),
       archetype: Archetype.private_message,
       target_group_names: "admins",
       skip_validations: true
-    }
+    )
+  end
 
-    if SiteSetting.ip_alert_email_admins
-      usernames = admin_usernames
-      args[:target_usernames] = usernames if usernames.present?
+  def self.admin_email_recipients
+    User.real
+      .where(admin: true, active: true)
+      .where(staged: false)
+      .where.not(id: Discourse.system_user.id)
+  end
+
+  def self.email_for(user)
+    user.primary_email&.email.presence || user.email.to_s.presence
+  rescue => e
+    Rails.logger.warn("[DiscourseIpAlert] Konnte Mailadresse für user_id=#{user&.id} nicht lesen: #{e.class}: #{e.message}")
+    nil
+  end
+
+  def self.send_admin_emails(user, ip_address, matched_rule, context)
+    return unless SiteSetting.ip_alert_email_admins
+
+    subject = message_title(user, ip_address)
+    body = message_body(user, ip_address, matched_rule, context, markdown: false)
+
+    admin_email_recipients.find_each do |admin|
+      Jobs.enqueue(
+        :send_ip_alert_email,
+        admin_id: admin.id,
+        subject: subject,
+        body: body
+      )
     end
-
-    PostCreator.create!(Discourse.system_user, args)
+  rescue => e
+    Rails.logger.error("[DiscourseIpAlert] Admin-Mail-Benachrichtigung fehlgeschlagen: #{e.class}: #{e.message}")
   end
 
   def self.process_login(user, context = nil)
@@ -219,6 +256,7 @@ module ::DiscourseIpAlert
     end
 
     send_admin_pm(user, ip_address, matched_rule, context)
+    send_admin_emails(user, ip_address, matched_rule, context)
     mark_cooldown(user.id, ip_address)
 
     Rails.logger.warn("[DiscourseIpAlert] Verdächtige Anmeldung: user=#{user.username}, ip=#{ip_address}, rule=#{matched_rule}")
@@ -262,6 +300,33 @@ after_initialize do
   end
 
   module ::Jobs
+    class SendIpAlertEmail < ::Jobs::Base
+      sidekiq_options retry: false
+
+      def execute(args)
+        admin = User.real.find_by(id: args[:admin_id])
+        return if admin.blank?
+        return if !admin.admin?
+        return if !admin.active?
+        return if admin.staged?
+
+        to_address = ::DiscourseIpAlert.email_for(admin)
+        return if to_address.blank?
+
+        message = Mail::Message.new
+        message.to = to_address
+        message.from = SiteSetting.notification_email
+        message.subject = args[:subject].to_s
+        message.body = args[:body].to_s
+        message.header["X-Auto-Response-Suppress"] = "All"
+        message.header["X-Discourse-Sender"] = "discourse-ip-alert"
+
+        Email::Sender.new(message, :ip_alert, admin).send
+      rescue => e
+        Rails.logger.error("[DiscourseIpAlert] Versand der Admin-Mail fehlgeschlagen: #{e.class}: #{e.message}")
+      end
+    end
+
     class CheckSuspiciousLoginIPs < ::Jobs::Scheduled
       every 6.hours
       sidekiq_options retry: false
