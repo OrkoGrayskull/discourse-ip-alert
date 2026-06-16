@@ -2,7 +2,7 @@
 
 # name: discourse-ip-alert
 # about: Sends an internal admin PM and optional email when a user logs in from a suspicious IP address.
-# version: 2.1.3
+# version: 2.1.4
 # authors: OrkoGrayskull
 # url: https://github.com/OrkoGrayskull/discourse-ip-alert
 # required_version: 3.3.0
@@ -336,14 +336,16 @@ after_initialize do
         to_address = ::DiscourseIpAlert.email_for(admin)
         return if to_address.blank?
 
-        message = Mail::Message.new
-        message.to = to_address
-        message.from = SiteSetting.notification_email
-        message.subject = args[:subject].to_s
-        message.body = args[:body].to_s
-        message.content_type = "text/plain; charset=UTF-8"
-        message.header["X-Auto-Response-Suppress"] = "All"
-        message.header["X-Discourse-Sender"] = "discourse-ip-alert"
+        message = ActionMailer::Base.mail(
+          to: to_address,
+          from: SiteSetting.notification_email,
+          subject: args[:subject].to_s,
+          body: args[:body].to_s,
+          content_type: "text/plain; charset=UTF-8"
+        )
+
+        message["X-Auto-Response-Suppress"] = "All"
+        message["X-Discourse-Sender"] = "discourse-ip-alert"
 
         Email::Sender.new(message, :admin_login, admin).send
 
