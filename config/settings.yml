@@ -23,3 +23,8 @@ plugins:
     type: integer
     min: 15
     max: 10080
+
+  ip_alert_email_admins:
+    default: false
+    client: false
+    type: bool
