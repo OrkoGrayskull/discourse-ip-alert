@@ -301,7 +301,7 @@ after_initialize do
 
   module ::Jobs
     class SendIpAlertEmail < ::Jobs::Base
-      sidekiq_options retry: false
+      sidekiq_options queue: "low", retry: false
 
       def execute(args)
         admin = User.real.find_by(id: args[:admin_id])
